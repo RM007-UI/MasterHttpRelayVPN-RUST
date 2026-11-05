@@ -13,6 +13,11 @@ import androidx.core.app.NotificationCompat
 import com.github.shadowsocks.bg.Tun2proxy
 import java.util.concurrent.atomic.AtomicBoolean
 
+// Standard Android package ID of v2rayNG. When Upstream SOCKS5 points to
+// v2rayNG's local inbound, its own outbound sockets must bypass mhrv's TUN;
+// otherwise the V2Ray connectivity/TLS check can be captured by mhrv again.
+private const val UPSTREAM_PROXY_PACKAGE = "com.v2ray.ang"
+
 /**
  * Foreground VpnService that:
  *   1. Runs the mhrv-rs Rust proxy (HTTP + SOCKS5 on 127.0.0.1).
@@ -30,6 +35,21 @@ import java.util.concurrent.atomic.AtomicBoolean
  * device still gets routed through us.
  */
 class MhrvVpnService : VpnService() {
+
+    /**
+     * Prevent a recursive VPN route when mhrv uses a local SOCKS5 inbound
+     * supplied by v2rayNG. This is only active while Upstream SOCKS5 is set.
+     */
+    private fun excludeUpstreamProxyFromTun(builder: VpnService.Builder, cfg: MhrvConfig) {
+        if (cfg.upstreamSocks5.isBlank()) return
+        try {
+            builder.addDisallowedApplication(UPSTREAM_PROXY_PACKAGE)
+            Log.i(TAG, "Excluded upstream proxy $UPSTREAM_PROXY_PACKAGE from mhrv TUN")
+        } catch (e: Throwable) {
+            // Missing package / ROM restriction should not stop the VPN.
+            Log.w(TAG, "Could not exclude upstream proxy $UPSTREAM_PROXY_PACKAGE: ${e.message}")
+        }
+    }
 
     private var tun: ParcelFileDescriptor? = null
     private var proxyHandle: Long = 0L
@@ -195,6 +215,7 @@ class MhrvVpnService : VpnService() {
                 } catch (e: Throwable) {
                     Log.w(TAG, "addDisallowedApplication(self) failed: ${e.message}")
                 }
+                excludeUpstreamProxyFromTun(builder, cfg)
             }
             SplitMode.ONLY -> {
                 if (cfg.splitApps.isEmpty()) {
@@ -202,10 +223,15 @@ class MhrvVpnService : VpnService() {
                     try {
                         builder.addDisallowedApplication(packageName)
                     } catch (_: Throwable) {}
+                    excludeUpstreamProxyFromTun(builder, cfg)
                 } else {
                     var allowed = 0
                     for (pkg in cfg.splitApps) {
-                        if (pkg == packageName) continue  // can't tunnel ourselves
+                        // Do not capture the app supplying the upstream SOCKS5.
+                        // In ONLY mode, a skipped package naturally bypasses TUN.
+                        if (pkg == packageName ||
+                            (cfg.upstreamSocks5.isNotBlank() && pkg == UPSTREAM_PROXY_PACKAGE)
+                        ) continue
                         try {
                             builder.addAllowedApplication(pkg)
                             allowed++
@@ -218,6 +244,7 @@ class MhrvVpnService : VpnService() {
                         try {
                             builder.addDisallowedApplication(packageName)
                         } catch (_: Throwable) {}
+                        excludeUpstreamProxyFromTun(builder, cfg)
                     }
                 }
             }
@@ -227,8 +254,11 @@ class MhrvVpnService : VpnService() {
                 } catch (e: Throwable) {
                     Log.w(TAG, "addDisallowedApplication(self) failed: ${e.message}")
                 }
+                excludeUpstreamProxyFromTun(builder, cfg)
                 for (pkg in cfg.splitApps) {
-                    if (pkg == packageName) continue  // already self-excluded above
+                    if (pkg == packageName ||
+                        (cfg.upstreamSocks5.isNotBlank() && pkg == UPSTREAM_PROXY_PACKAGE)
+                    ) continue  // self/upstream proxy are already excluded
                     try { builder.addDisallowedApplication(pkg) } catch (e: Throwable) {
                         Log.w(TAG, "addDisallowedApplication($pkg) failed: ${e.message}")
                     }
