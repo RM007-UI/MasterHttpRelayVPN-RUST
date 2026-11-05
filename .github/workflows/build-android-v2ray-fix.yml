@@ -1,6 +1,9 @@
 name: Build Android APK (V2Ray upstream fix)
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
